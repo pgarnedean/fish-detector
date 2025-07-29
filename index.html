@@ -28,17 +28,30 @@
   <canvas id="overlay"></canvas>
   <div id="countBox">魚: 0</div>
 
-  <!-- TensorFlow.js 本体 -->
+  <!-- TensorFlow.js -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
-  <!-- 事前学習済みの魚検出モデル（例: Teachable Machine 等で魚モデルを作成し、tfjs 形式にエクスポートしたもの） -->
   <script>
     const MODEL_URL = 'path/to/your/fish_model/model.json'; 
     let model, video, canvas, ctx, countBox;
 
     async function setupCamera() {
       video = document.getElementById('video');
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      video.srcObject = stream;
+      // スマホ背面（environment）、それ以外はデフォルトカメラ
+      const constraints = {
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      };
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = stream;
+      } catch (e) {
+        console.warn("背面カメラが利用できませんでした。デフォルトカメラを使用します。", e);
+        const fallback = await navigator.mediaDevices.getUserMedia({ video: true });
+        video.srcObject = fallback;
+      }
       return new Promise(resolve => {
         video.onloadedmetadata = () => {
           video.play();
@@ -54,11 +67,8 @@
 
     function preprocessVideoFrame() {
       const input = tf.browser.fromPixels(video);
-      // モデルに合わせたリサイズ (例: 320×320)
       const resized = tf.image.resizeBilinear(input, [320, 320]);
-      // 正規化 (例: [0,255]→[0,1])
       const normalized = resized.div(255.0);
-      // バッチ次元を追加
       return normalized.expandDims(0);
     }
 
@@ -68,7 +78,6 @@
       const result = await model.executeAsync(inputTensor);
       tf.dispose(inputTensor);
 
-      // モデルの出力を想定: [boxes, scores, classes, detections]
       const [boxes, scores, classes] = result;
       const boxesData = boxes.dataSync();
       const scoresData = scores.dataSync();
@@ -76,31 +85,23 @@
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       let fishCount = 0;
-
-      // スコア閾値
       const threshold = 0.5;
 
       for (let i = 0; i < scoresData.length; i++) {
-        if (scoresData[i] > threshold && Math.round(classesData[i]) === /*魚のクラスID*/ 1) {
+        if (scoresData[i] > threshold && Math.round(classesData[i]) === 1) {
           fishCount++;
-          // box: [ymin, xmin, ymax, xmax] 正規化座標
-          const ymin = boxesData[i*4] * video.videoHeight;
+          const ymin = boxesData[i*4]   * video.videoHeight;
           const xmin = boxesData[i*4+1] * video.videoWidth;
           const ymax = boxesData[i*4+2] * video.videoHeight;
           const xmax = boxesData[i*4+3] * video.videoWidth;
           const w = xmax - xmin, h = ymax - ymin;
-
-          // 緑色の枠を描画
           ctx.lineWidth = 4;
           ctx.strokeStyle = '#0f0';
           ctx.strokeRect(xmin, ymin, w, h);
         }
       }
 
-      // カウント表示更新
       countBox.textContent = `魚: ${fishCount}`;
-
-      // 後片付け
       tf.dispose(result);
       requestAnimationFrame(detectFrame);
     }
@@ -112,7 +113,6 @@
       canvas.height = video.videoHeight;
       ctx = canvas.getContext('2d');
       countBox = document.getElementById('countBox');
-
       await loadModel();
       detectFrame();
     }
