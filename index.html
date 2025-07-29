@@ -1,119 +1,83 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8">
-  <title>魚検出デモ</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>カメラ動体検知デモ</title>
   <style>
     body { margin: 0; overflow: hidden; }
-    #video, #overlay {
-      position: absolute; top: 0; left: 0;
-      width: 100%; height: auto; max-height: 100vh;
-    }
-    #countBox {
-      position: absolute; top: 10px; right: 10px;
-      font-size: 24px; color: #0f0;
-      text-shadow: 1px 1px 2px #000;
-      background: rgba(0,0,0,0.3);
-      padding: 4px 8px; border-radius: 4px;
-    }
+    #canvasOutput { position: absolute; top: 0; left: 0; }
+    #count { position: absolute; top: 10px; right: 20px; font-size: 24px; color: #00FF00; font-weight: bold; }
   </style>
 </head>
 <body>
-  <video id="video" autoplay muted playsinline></video>
-  <canvas id="overlay"></canvas>
-  <div id="countBox">魚: 0</div>
+  <video id="video" playsinline autoplay style="display:none;"></video>
+  <canvas id="canvasOutput"></canvas>
+  <div id="count">0</div>
 
-  <!-- TensorFlow.js -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+  <script async src="https://docs.opencv.org/4.5.5/opencv.js" onload="onOpenCvReady();"></script>
   <script>
-    // ── ここだけ書き換えてください ──
-    // あなたが学習・変換した魚検出モデルの URL
-    const MODEL_URL = 'https://your-domain.com/path/to/fish_model/model.json';
-    // Custom モデル上で “魚” クラスに振った ID。学習時の label_map.pbtxt をご確認ください。
-    const FISH_CLASS_ID = 1;   
-    // ─────────────────────────────
+    let video = document.getElementById('video');
+    let canvas = document.getElementById('canvasOutput');
+    let ctx = canvas.getContext('2d');
+    let countElem = document.getElementById('count');
 
-    let model, video, canvas, ctx, countBox;
+    function onOpenCvReady() {
+      navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => { video.srcObject = stream; video.play(); })
+        .catch(err => console.error('カメラへのアクセスに失敗しました: ', err));
 
-    async function setupCamera() {
-      video = document.getElementById('video');
-      const constraints = {
-        video: {
-          facingMode: { ideal: "environment" },  // スマホでは背面カメラ優先
-          width:  { ideal: 1280 },
-          height: { ideal: 720 }
+      video.addEventListener('playing', () => {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        let cap = new cv.VideoCapture(video);
+        let frame = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+        let gray = new cv.Mat();
+        let prevGray = new cv.Mat();
+        let diff = new cv.Mat();
+        let thresh = new cv.Mat();
+        let M = cv.Mat.ones(5, 5, cv.CV_8U);
+        let contours = new cv.MatVector();
+        let hierarchy = new cv.Mat();
+
+        // 初回フレームをキャプチャ
+        cap.read(frame);
+        cv.cvtColor(frame, prevGray, cv.COLOR_RGBA2GRAY);
+
+        function process() {
+          cap.read(frame);
+          cv.cvtColor(frame, gray, cv.COLOR_RGBA2GRAY);
+          // フレーム差分を計算
+          cv.absdiff(gray, prevGray, diff);
+          cv.threshold(diff, thresh, 25, 255, cv.THRESH_BINARY);
+          // ノイズ除去
+          cv.morphologyEx(thresh, thresh, cv.MORPH_OPEN, M);
+          // 輪郭検出
+          cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+          // 描画
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          let count = 0;
+          for (let i = 0; i < contours.size(); ++i) {
+            let cnt = contours.get(i);
+            let rect = cv.boundingRect(cnt);
+            // 小さなノイズを除外
+            if (rect.width * rect.height < 500) continue;
+            count++;
+            ctx.strokeStyle = '#00FF00';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+          }
+          countElem.textContent = count;
+
+          // 今のフレームを次の比較用に保存
+          gray.copyTo(prevGray);
+          requestAnimationFrame(process);
         }
-      };
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        video.srcObject = stream;
-      } catch (e) {
-        console.warn("背面カメラ取得失敗 → デフォルトカメラ", e);
-        video.srcObject = await navigator.mediaDevices.getUserMedia({ video: true });
-      }
-      return new Promise(res => video.onloadedmetadata = res);
-    }
-
-    async function loadModel() {
-      model = await tf.loadGraphModel(MODEL_URL);
-      console.log('Custom 魚検出モデル読み込み完了');
-    }
-
-    function preprocess() {
-      return tf.tidy(() => {
-        const img = tf.browser.fromPixels(video);
-        const resized = tf.image.resizeBilinear(img, [320, 320]);
-        const normalized = resized.div(255.0);
-        return normalized.expandDims(0);
+        requestAnimationFrame(process);
       });
     }
-
-    async function detect() {
-      if (!model) return;
-      const input = preprocess();
-      const [boxes, scores, classes] = await model.executeAsync(input);
-      tf.dispose(input);
-
-      const b = boxes.arraySync()[0];     // shape: [N,4]
-      const s = scores.arraySync()[0];    // shape: [N]
-      const c = classes.dataSync();       // shape: [N]
-      tf.dispose([boxes, scores]);
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      let fishCount = 0;
-      const TH = 0.6; // 閾値はモデルに合わせて微調整
-
-      for (let i = 0; i < s.length; i++) {
-        if (s[i] > TH && Math.round(c[i]) === FISH_CLASS_ID) {
-          fishCount++;
-          // ymin, xmin, ymax, xmax (normalized)
-          const [y1, x1, y2, x2] = b[i];
-          const x = x1 * video.videoWidth;
-          const y = y1 * video.videoHeight;
-          const w = (x2 - x1) * video.videoWidth;
-          const h = (y2 - y1) * video.videoHeight;
-          ctx.lineWidth   = 4;
-          ctx.strokeStyle = '#0f0';
-          ctx.strokeRect(x, y, w, h);
-        }
-      }
-
-      countBox.textContent = `魚: ${fishCount}`;
-      requestAnimationFrame(detect);
-    }
-
-    async function main() {
-      await setupCamera();
-      canvas = document.getElementById('overlay');
-      canvas.width  = video.videoWidth;
-      canvas.height = video.videoHeight;
-      ctx = canvas.getContext('2d');
-      countBox = document.getElementById('countBox');
-      await loadModel();
-      detect();
-    }
-
-    window.addEventListener('DOMContentLoaded', main);
   </script>
 </body>
 </html>
