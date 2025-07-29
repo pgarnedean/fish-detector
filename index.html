@@ -6,20 +6,15 @@
   <style>
     body { margin: 0; overflow: hidden; }
     #video, #overlay {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%; height: auto;
-      max-height: 100vh;
+      position: absolute; top: 0; left: 0;
+      width: 100%; height: auto; max-height: 100vh;
     }
     #countBox {
-      position: absolute;
-      top: 10px; right: 10px;
-      font-size: 24px;
-      color: #0f0;
+      position: absolute; top: 10px; right: 10px;
+      font-size: 24px; color: #0f0;
       text-shadow: 1px 1px 2px #000;
       background: rgba(0,0,0,0.3);
-      padding: 4px 8px;
-      border-radius: 4px;
+      padding: 4px 8px; border-radius: 4px;
     }
   </style>
 </head>
@@ -31,16 +26,21 @@
   <!-- TensorFlow.js -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
   <script>
-    const MODEL_URL = 'path/to/your/fish_model/model.json'; 
+    // ── ここだけ書き換えてください ──
+    // あなたが学習・変換した魚検出モデルの URL
+    const MODEL_URL = 'https://your-domain.com/path/to/fish_model/model.json';
+    // Custom モデル上で “魚” クラスに振った ID。学習時の label_map.pbtxt をご確認ください。
+    const FISH_CLASS_ID = 1;   
+    // ─────────────────────────────
+
     let model, video, canvas, ctx, countBox;
 
     async function setupCamera() {
       video = document.getElementById('video');
-      // スマホ背面（environment）、それ以外はデフォルトカメラ
       const constraints = {
         video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
+          facingMode: { ideal: "environment" },  // スマホでは背面カメラ優先
+          width:  { ideal: 1280 },
           height: { ideal: 720 }
         }
       };
@@ -48,73 +48,69 @@
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         video.srcObject = stream;
       } catch (e) {
-        console.warn("背面カメラが利用できませんでした。デフォルトカメラを使用します。", e);
-        const fallback = await navigator.mediaDevices.getUserMedia({ video: true });
-        video.srcObject = fallback;
+        console.warn("背面カメラ取得失敗 → デフォルトカメラ", e);
+        video.srcObject = await navigator.mediaDevices.getUserMedia({ video: true });
       }
-      return new Promise(resolve => {
-        video.onloadedmetadata = () => {
-          video.play();
-          resolve();
-        };
-      });
+      return new Promise(res => video.onloadedmetadata = res);
     }
 
     async function loadModel() {
       model = await tf.loadGraphModel(MODEL_URL);
-      console.log('モデル読み込み完了');
+      console.log('Custom 魚検出モデル読み込み完了');
     }
 
-    function preprocessVideoFrame() {
-      const input = tf.browser.fromPixels(video);
-      const resized = tf.image.resizeBilinear(input, [320, 320]);
-      const normalized = resized.div(255.0);
-      return normalized.expandDims(0);
+    function preprocess() {
+      return tf.tidy(() => {
+        const img = tf.browser.fromPixels(video);
+        const resized = tf.image.resizeBilinear(img, [320, 320]);
+        const normalized = resized.div(255.0);
+        return normalized.expandDims(0);
+      });
     }
 
-    async function detectFrame() {
+    async function detect() {
       if (!model) return;
-      const inputTensor = preprocessVideoFrame();
-      const result = await model.executeAsync(inputTensor);
-      tf.dispose(inputTensor);
+      const input = preprocess();
+      const [boxes, scores, classes] = await model.executeAsync(input);
+      tf.dispose(input);
 
-      const [boxes, scores, classes] = result;
-      const boxesData = boxes.dataSync();
-      const scoresData = scores.dataSync();
-      const classesData = classes.dataSync();
+      const b = boxes.arraySync()[0];     // shape: [N,4]
+      const s = scores.arraySync()[0];    // shape: [N]
+      const c = classes.dataSync();       // shape: [N]
+      tf.dispose([boxes, scores]);
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       let fishCount = 0;
-      const threshold = 0.5;
+      const TH = 0.6; // 閾値はモデルに合わせて微調整
 
-      for (let i = 0; i < scoresData.length; i++) {
-        if (scoresData[i] > threshold && Math.round(classesData[i]) === 1) {
+      for (let i = 0; i < s.length; i++) {
+        if (s[i] > TH && Math.round(c[i]) === FISH_CLASS_ID) {
           fishCount++;
-          const ymin = boxesData[i*4]   * video.videoHeight;
-          const xmin = boxesData[i*4+1] * video.videoWidth;
-          const ymax = boxesData[i*4+2] * video.videoHeight;
-          const xmax = boxesData[i*4+3] * video.videoWidth;
-          const w = xmax - xmin, h = ymax - ymin;
-          ctx.lineWidth = 4;
+          // ymin, xmin, ymax, xmax (normalized)
+          const [y1, x1, y2, x2] = b[i];
+          const x = x1 * video.videoWidth;
+          const y = y1 * video.videoHeight;
+          const w = (x2 - x1) * video.videoWidth;
+          const h = (y2 - y1) * video.videoHeight;
+          ctx.lineWidth   = 4;
           ctx.strokeStyle = '#0f0';
-          ctx.strokeRect(xmin, ymin, w, h);
+          ctx.strokeRect(x, y, w, h);
         }
       }
 
       countBox.textContent = `魚: ${fishCount}`;
-      tf.dispose(result);
-      requestAnimationFrame(detectFrame);
+      requestAnimationFrame(detect);
     }
 
     async function main() {
       await setupCamera();
       canvas = document.getElementById('overlay');
-      canvas.width = video.videoWidth;
+      canvas.width  = video.videoWidth;
       canvas.height = video.videoHeight;
       ctx = canvas.getContext('2d');
       countBox = document.getElementById('countBox');
       await loadModel();
-      detectFrame();
+      detect();
     }
 
     window.addEventListener('DOMContentLoaded', main);
